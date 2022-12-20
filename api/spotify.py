@@ -5,7 +5,7 @@ import requests
 
 from base64 import b64encode
 from dotenv import load_dotenv, find_dotenv
-from flask import Flask, Response, jsonify, render_template, templating
+from flask import Flask, Response, render_template, request
 
 load_dotenv(find_dotenv())
 
@@ -16,6 +16,7 @@ PLACEHOLDER_IMAGE = "iVBORw0KGgoAAAANSUhEUgAAA4QAAAOEBAMAAAALYOIIAAAAFVBMVEXm5ub
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_SECRET_ID = os.getenv("SPOTIFY_SECRET_ID")
 SPOTIFY_REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN")
+SPOTIFY_TOKEN = ""
 
 FALLBACK_THEME = "spotify.html.j2"
 
@@ -41,95 +42,108 @@ def refreshToken():
     }
 
     headers = {"Authorization": "Basic {}".format(getAuth())}
-    response = requests.post(REFRESH_TOKEN_URL, data=data, headers=headers)
+    response = requests.post(
+        REFRESH_TOKEN_URL, data=data, headers=headers).json()
 
     try:
-        return response.json()["access_token"]
+        return response["access_token"]
     except KeyError:
-        print(json.dumps(response.json()))
+        print(json.dumps(response))
         print("\n---\n")
-        raise KeyError(str(response.json()))
+        raise KeyError(str(response))
 
 
-def recentlyPlayed():
-    token = refreshToken()
-    headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(RECENTLY_PLAYING_URL, headers=headers)
+def get(url):
+    global SPOTIFY_TOKEN
 
-    if response.status_code == 204:
-        return {}
-    return response.json()
+    if (SPOTIFY_TOKEN == ""):
+        SPOTIFY_TOKEN = refreshToken()
 
+    response = requests.get(
+        url, headers={"Authorization": f"Bearer {SPOTIFY_TOKEN}"})
 
-def nowPlaying():
-    token = refreshToken()
-    headers = {"Authorization": f"Bearer {token}"}
-    response = requests.get(NOW_PLAYING_URL, headers=headers)
-
-    if response.status_code == 204:
-        return {}
-    return response.json()
+    if response.status_code == 401:
+        SPOTIFY_TOKEN = refreshToken()
+        response = requests.get(
+            url, headers={"Authorization": f"Bearer {SPOTIFY_TOKEN}"}).json()
+        return response
+    elif response.status_code == 204:
+        raise Exception(f"{url} returned no data.")
+    else:
+        return response.json()
 
 
 def barGen(barCount):
     barCSS = ""
     left = 1
     for i in range(1, barCount + 1):
-        anim = random.randint(1000, 1350)
+        anim = random.randint(500, 1000)
+        # below code generates random cubic-bezier values
+        x1 = random.random()
+        y1 = random.random()*2
+        x2 = random.random()
+        y2 = random.random()*2
         barCSS += (
-            ".bar:nth-child({})  {{ left: {}px; animation-duration: {}ms; }}".format(
-                i, left, anim
+            ".bar:nth-child({})  {{ left: {}px; animation-duration: 15s, {}ms; animation-timing-function: ease, cubic-bezier({},{},{},{}); }}".format(
+                i, left, anim, x1, y1, x2, y2
             )
         )
         left += 4
     return barCSS
 
+
 def getTemplate():
     try:
-        file = open("api/templates.json","r")
+        file = open("api/templates.json", "r")
         templates = json.loads(file.read())
         return templates["templates"][templates["current-theme"]]
     except Exception as e:
-        print(f"Failed to load templates.")
+        print(f"Failed to load templates.\r\n```{e}```")
         return FALLBACK_THEME
 
 
 def loadImageB64(url):
-    resposne = requests.get(url)
-    return b64encode(resposne.content).decode("ascii")
+    response = requests.get(url)
+    return b64encode(response.content).decode("ascii")
 
 
-def makeSVG(data):
+def makeSVG(data, background_color, border_color):
     barCount = 84
-    contentBar = "".join(["<div class='bar'></div>" for i in range(barCount)])
+    contentBar = "".join(["<div class='bar'></div>" for _ in range(barCount)])
     barCSS = barGen(barCount)
 
-    if data == {} or data["item"] == "None" or data["item"] is None:
+    if not "is_playing" in data:
         # contentBar = "" #Shows/Hides the EQ bar if no song is currently playing
         currentStatus = "Was playing:"
-        recentPlays = recentlyPlayed()
+        recentPlays = get(RECENTLY_PLAYING_URL)
         recentPlaysLength = len(recentPlays["items"])
         itemIndex = random.randint(0, recentPlaysLength - 1)
         item = recentPlays["items"][itemIndex]["track"]
     else:
         item = data["item"]
         currentStatus = "Vibing to:"
-    
+
     if item["album"]["images"] == []:
         image = PLACEHOLDER_IMAGE
-    else : 
+    else:
         image = loadImageB64(item["album"]["images"][1]["url"])
 
     artistName = item["artists"][0]["name"].replace("&", "&amp;")
     songName = item["name"].replace("&", "&amp;")
+    songURI = item["external_urls"]["spotify"]
+    artistURI = item["artists"][0]["external_urls"]["spotify"]
 
     dataDict = {
         "contentBar": contentBar,
         "barCSS": barCSS,
         "artistName": artistName,
         "songName": songName,
+        "songURI": songURI,
+        "artistURI": artistURI,
         "image": image,
         "status": currentStatus,
+        "background_color": background_color,
+        "border_color": border_color
     }
 
     return render_template(getTemplate(), **dataDict)
@@ -137,9 +151,17 @@ def makeSVG(data):
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
+@app.route('/with_parameters')
 def catch_all(path):
-    data = nowPlaying()
-    svg = makeSVG(data)
+    background_color = request.args.get('background_color') or "181414"
+    border_color = request.args.get('border_color') or "181414"
+
+    try:
+        data = get(NOW_PLAYING_URL)
+    except Exception:
+        data = get(RECENTLY_PLAYING_URL)
+
+    svg = makeSVG(data, background_color, border_color)
 
     resp = Response(svg, mimetype="image/svg+xml")
     resp.headers["Cache-Control"] = "s-maxage=1"
@@ -148,4 +170,5 @@ def catch_all(path):
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", debug=True, port=os.getenv("PORT") or 5000)
+
